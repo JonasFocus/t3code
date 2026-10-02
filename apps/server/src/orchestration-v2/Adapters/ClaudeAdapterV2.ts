@@ -2405,7 +2405,7 @@ function providerFailureFromResult(
   const structuredError = isOverloadedResult(message)
     ? "Claude API is overloaded (529). Try again shortly."
     : message.subtype === "success" && message.api_error_status === 429
-      ? "Claude API rate limit reached. Try again later."
+      ? (failureHint ?? "Claude API rate limit reached. Try again later.")
       : terminalResultError(message.terminal_reason, failureHint);
   if (message.subtype !== "success") {
     return makeProviderFailure({

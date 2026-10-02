@@ -2600,6 +2600,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     readonly name: string;
     readonly error: SDKAssistantMessageError | undefined;
     readonly result: string;
+    readonly apiErrorStatus?: number;
     readonly expected: string;
   }>([
     {
@@ -2612,6 +2613,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       name: "a 429 that rejected no usage window",
       error: "rate_limit",
       result: "API Error: Request rejected (429) · rate_limit_error: example rate limit",
+      apiErrorStatus: 429,
       expected: "API Error: Request rejected (429) · rate_limit_error: example rate limit",
     },
     {
@@ -2632,42 +2634,45 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       result: "",
       expected: "Claude gave up after repeated API errors.",
     },
-  ])("reports the CLI's API error text after $name", ({ name, error, result, expected }) =>
-    Effect.gen(function* () {
-      const harness = yield* makeWakeHarness;
-      yield* harness.runtime.startTurn(
-        makeClaudeTestTurnInput({
-          threadId: harness.threadId,
-          providerThread: harness.providerThread,
-          now: yield* DateTime.now,
-          attemptId: RunAttemptId.make(`attempt-claude-api-error-${name}`),
-          text: "Continue.",
-          attachments: [],
-        }),
-      );
-      yield* Queue.offer(
-        harness.sdkMessages,
-        makeAssistantErrorFrame({
-          uuid: "00000000-0000-4000-8000-000000000640",
-          error,
-          text: error === undefined ? "Working on it." : result,
-        }),
-      );
-      yield* Queue.offer(
-        harness.sdkMessages,
-        makeResultFrame({
-          uuid: "00000000-0000-4000-8000-000000000641",
-          result,
-          isError: true,
-          terminalReason: "api_error",
-        }),
-      );
+  ])(
+    "reports the CLI's API error text after $name",
+    ({ name, error, result, apiErrorStatus, expected }) =>
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make(`attempt-claude-api-error-${name}`),
+            text: "Continue.",
+            attachments: [],
+          }),
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeAssistantErrorFrame({
+            uuid: "00000000-0000-4000-8000-000000000640",
+            error,
+            text: error === undefined ? "Working on it." : result,
+          }),
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000641",
+            result,
+            isError: true,
+            terminalReason: "api_error",
+            ...(apiErrorStatus === undefined ? {} : { apiErrorStatus }),
+          }),
+        );
 
-      const terminal = yield* Queue.take(harness.terminalReceipts);
-      assert.equal(terminal.status, "failed");
-      if (terminal.status !== "failed") return;
-      assert.equal(terminal.failure.message, expected);
-    }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+        const terminal = yield* Queue.take(harness.terminalReceipts);
+        assert.equal(terminal.status, "failed");
+        if (terminal.status !== "failed") return;
+        assert.equal(terminal.failure.message, expected);
+      }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
   );
 
   it.effect.each([429, 401, 529])(
