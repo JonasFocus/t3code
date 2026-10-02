@@ -225,7 +225,14 @@ export const repointLauncherAfterSelfUpdate = Effect.fn(
       // Ownership scoped to the previous version: a `t3` pinned elsewhere stays put.
       versionsDir: from.versionDir,
       targetEntryPath: target.entryPath,
-    });
+    }).pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning("Could not move the t3 command to the updated version", {
+          launchedAs,
+          cause,
+        }),
+      ),
+    );
   }
 });
 
