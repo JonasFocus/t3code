@@ -4924,14 +4924,14 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
         );
 
         const usageLimitResetAt = Effect.fnUntraced(function* () {
+          const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
           const resetAt = codexUsageLimitResetAt(yield* Ref.get(rateLimitSnapshot));
-          if (resetAt !== null || adapterOptions.getUsageLimits === undefined) return resetAt;
+          // The session snapshot outlives the turn that filled it, so its reset may have passed.
+          if (resetAt !== null && Date.parse(resetAt) > nowMs) return resetAt;
+          if (adapterOptions.getUsageLimits === undefined) return null;
           // The session snapshot fills only from rate-limit notifications, which a
           // turn refused at its first request may never get.
-          return codexPublishedUsageLimitResetAt(
-            yield* adapterOptions.getUsageLimits,
-            DateTime.toEpochMillis(yield* DateTime.now),
-          );
+          return codexPublishedUsageLimitResetAt(yield* adapterOptions.getUsageLimits, nowMs);
         });
 
         const makeRootTerminalEvent = Effect.fn("CodexAdapterV2.makeRootTerminalEvent")(

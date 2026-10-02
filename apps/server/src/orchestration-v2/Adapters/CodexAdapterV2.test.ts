@@ -5565,6 +5565,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       notification: false,
       expectedClass: "usage_limit",
     },
+    {
+      name: "expired-session-reset",
+      code: "usageLimitExceeded",
+      notification: false,
+      expectedClass: "usage_limit",
+    },
   ] as const) {
     it.effect(`classifies Codex terminal failures from ${scenario.name} evidence`, () =>
       Effect.scoped(
@@ -5592,6 +5598,27 @@ describe("CodexAdapterV2 post-settle continuation", () => {
               ...codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt: "Continue." }),
               ...(scenario.name === "known-reset" || scenario.name === "deferred-reset"
                 ? [snapshot]
+                : []),
+              // An earlier turn's session window, already reset by the time this turn stops.
+              ...(scenario.name === "expired-session-reset"
+                ? [
+                    {
+                      ...snapshot,
+                      frame: {
+                        method: "account/rateLimits/updated",
+                        params: {
+                          rateLimits: {
+                            limitId: "codex",
+                            primary: {
+                              usedPercent: 100,
+                              resetsAt: 2000000000,
+                              windowDurationMins: 300,
+                            },
+                          },
+                        },
+                      },
+                    },
+                  ]
                 : []),
               ...(scenario.name === "deferred-reset"
                 ? [
@@ -5709,6 +5736,8 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 : []),
             ],
           });
+          if (scenario.name === "expired-session-reset")
+            yield* TestClock.setTime(Date.parse("2033-05-19T03:00:00.000Z"));
           const resetReceipt = yield* Deferred.make<void>();
           const harness = yield* makeCodexReplayHarness(
             transcript,
@@ -5720,7 +5749,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 : Effect.void,
             undefined,
             undefined,
-            scenario.name === "published-reset"
+            scenario.name === "published-reset" || scenario.name === "expired-session-reset"
               ? Effect.succeed({
                   checkedAt: "2033-05-19T03:00:00.000Z",
                   windows: [
@@ -5754,7 +5783,8 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           if (
             scenario.name === "known-reset" ||
             scenario.name === "deferred-reset" ||
-            scenario.name === "published-reset"
+            scenario.name === "published-reset" ||
+            scenario.name === "expired-session-reset"
           )
             assert.equal(terminal.failure.resetAt, resetAt);
           if (scenario.name === "matching-details")
