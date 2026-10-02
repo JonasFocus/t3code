@@ -5591,6 +5591,7 @@ export function makeCodexAdapterV2(adapterOptions: CodexAdapterV2Options): Provi
                     .pipe(
                       Effect.flatMap(decodeCodexWorkspaceWriteConfig),
                       Effect.map((response) => response.config.sandbox_workspace_write),
+                      Effect.timeout("5 seconds"),
                       Effect.catch((cause) =>
                         Effect.logWarning("Failed to read Codex workspace-write sandbox config.", {
                           cause,
