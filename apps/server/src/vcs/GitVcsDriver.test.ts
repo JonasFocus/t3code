@@ -231,6 +231,9 @@ it.effect("checkpoint capture still fails when a clean filter rejects a file", (
     );
 
     assert.strictEqual(result._tag, "Failure");
+    if (result._tag === "Failure") {
+      assert.strictEqual(result.failure._tag, "VcsProcessExitError");
+    }
     assert.deepEqual(yield* fileSystem.readFile(path.join(cwd, ".git", "index")), originalIndex);
     assert.isFalse(yield* driver.checkpoints.hasCheckpointRef({ cwd, checkpointRef }));
   }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
@@ -264,6 +267,78 @@ it.effect("checkpoint capture refuses a truncated nested repository listing", ()
     assert.strictEqual(result._tag, "Failure");
     assert.isFalse(yield* driver.checkpoints.hasCheckpointRef({ cwd, checkpointRef }));
   }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
+);
+
+it.effect("checkpoint capture skips an ignored project while keeping its allowed sibling", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const driver = yield* GitVcsDriver.makeVcsDriverShape();
+    const parent = yield* fs.makeTempDirectoryScoped({ prefix: "t3-checkpoint-ignored-" });
+    const { git } = yield* makeCheckpointFixture(driver, parent);
+    yield* fs.writeFileString(
+      path.join(parent, ".gitignore"),
+      "*\n!.gitignore\n!file.txt\n!keep/\n!keep/**\n",
+    );
+    const ignoredCwd = path.join(parent, "ignored");
+    const keepCwd = path.join(parent, "keep");
+    yield* fs.makeDirectory(ignoredCwd);
+    yield* fs.makeDirectory(keepCwd);
+    yield* fs.writeFileString(path.join(ignoredCwd, "secret.txt"), "private\n");
+    yield* fs.writeFileString(path.join(keepCwd, "new.txt"), "new\n");
+    const originalIndex = yield* fs.readFile(path.join(parent, ".git", "index"));
+    const ignoredRef = CheckpointRef.make("refs/t3/checkpoints/ignored");
+    const keepRef = CheckpointRef.make("refs/t3/checkpoints/keep");
+
+    const ignored = yield* Effect.result(
+      driver.checkpoints.captureCheckpoint({ cwd: ignoredCwd, checkpointRef: ignoredRef }),
+    );
+    yield* driver.checkpoints.captureCheckpoint({ cwd: keepCwd, checkpointRef: keepRef });
+
+    assert.strictEqual((yield* git(["show", `${keepRef}:keep/new.txt`])).stdout, "new\n");
+    assert.strictEqual((yield* git(["ls-tree", "-r", keepRef, "--", "ignored"])).stdout, "");
+    assert.isFalse(
+      yield* driver.checkpoints.hasCheckpointRef({ cwd: parent, checkpointRef: ignoredRef }),
+    );
+    assert.deepEqual(yield* fs.readFile(path.join(parent, ".git", "index")), originalIndex);
+    assert.strictEqual(ignored._tag, "Failure");
+    if (ignored._tag === "Failure") {
+      assert.strictEqual(ignored.failure._tag, "VcsUnsupportedOperationError");
+    }
+  }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
+);
+
+it.effect(
+  "checkpoint capture keeps tracked edits but excludes new files in a project ignored later",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const driver = yield* GitVcsDriver.makeVcsDriverShape();
+      const parent = yield* fs.makeTempDirectoryScoped({ prefix: "t3-checkpoint-ignored-later-" });
+      const { git, checkpointRef } = yield* makeCheckpointFixture(driver, parent);
+      const cwd = path.join(parent, "sub");
+      yield* fs.makeDirectory(cwd);
+      yield* fs.writeFileString(path.join(cwd, "tracked.txt"), "before\n");
+      yield* git(["add", "sub"]);
+      yield* git(["commit", "-m", "track project"]);
+      yield* fs.writeFileString(path.join(parent, ".gitignore"), "sub/\n");
+      yield* fs.writeFileString(path.join(cwd, "tracked.txt"), "after\n");
+      yield* fs.writeFileString(path.join(cwd, "secret.txt"), "private\n");
+      const originalIndex = yield* fs.readFile(path.join(parent, ".git", "index"));
+
+      yield* driver.checkpoints.captureCheckpoint({ cwd, checkpointRef });
+
+      assert.strictEqual(
+        (yield* git(["show", `${checkpointRef}:sub/tracked.txt`])).stdout,
+        "after\n",
+      );
+      assert.strictEqual(
+        (yield* git(["ls-tree", "-r", "--name-only", checkpointRef, "--", "sub"])).stdout,
+        "sub/tracked.txt\n",
+      );
+      assert.deepEqual(yield* fs.readFile(path.join(parent, ".git", "index")), originalIndex);
+    }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
 );
 
 it.effect("checkpoint recovery refuses excessive candidates before probing", () =>

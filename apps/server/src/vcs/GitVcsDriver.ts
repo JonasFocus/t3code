@@ -13,6 +13,7 @@ import { ChildProcessSpawner } from "effect/process";
 import {
   GitCommandError,
   VcsProcessExitError,
+  VcsUnsupportedOperationError,
   type VcsSwitchRefInput,
   type VcsSwitchRefResult,
   type VcsCreateRefInput,
@@ -947,6 +948,25 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
           }
         }
 
+        const workspaceIgnored = (yield* filterIgnoredPaths(input.cwd, ["."])).length === 0;
+        if (workspaceIgnored) {
+          const tracked = yield* execute({
+            operation,
+            cwd: input.cwd,
+            args: [...indexConfig, "ls-files", "--cached", "-z", "--", "."],
+            env: commitEnv,
+            maxOutputBytes: 1,
+            outputMode: "truncate",
+          });
+          if (tracked.stdout.length === 0) {
+            return yield* new VcsUnsupportedOperationError({
+              operation,
+              kind: "git",
+              detail: "The workspace directory is ignored by its Git repository.",
+            });
+          }
+        }
+
         const stageFiles = (exclusions: ReadonlyArray<string>) =>
           execute({
             operation,
@@ -956,7 +976,8 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
               ...durableWrite,
               "add",
               ...(sparseCheckout ? ["--sparse"] : []),
-              "-A",
+              // add -A rejects ignored directories even when they contain tracked files.
+              workspaceIgnored ? "-u" : "-A",
               "--",
               ".",
               ...exclusions,
