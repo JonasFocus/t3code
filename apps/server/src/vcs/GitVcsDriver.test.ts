@@ -308,9 +308,13 @@ it.effect("checkpoint capture skips an ignored project while keeping its allowed
   }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
 );
 
-it.effect(
-  "checkpoint capture keeps tracked edits but excludes new files in a project ignored later",
-  () =>
+it.effect.each([
+  { tracking: "committed-only", committed: ["committed.txt"], staged: [] },
+  { tracking: "staged-only", committed: [], staged: ["staged.txt"] },
+  { tracking: "mixed", committed: ["committed.txt"], staged: ["staged.txt"] },
+])(
+  "checkpoint capture keeps $tracking tracked edits but excludes new files in a project ignored later",
+  ({ committed, staged }) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -319,25 +323,41 @@ it.effect(
       const { git, checkpointRef } = yield* makeCheckpointFixture(driver, parent);
       const cwd = path.join(parent, "sub");
       yield* fs.makeDirectory(cwd);
-      yield* fs.writeFileString(path.join(cwd, "tracked.txt"), "before\n");
-      yield* git(["add", "sub"]);
-      yield* git(["commit", "-m", "track project"]);
+      for (const file of committed) {
+        yield* fs.writeFileString(path.join(cwd, file), "committed\n");
+        yield* git(["add", `sub/${file}`]);
+      }
+      if (committed.length > 0) {
+        yield* git(["commit", "-m", "track project"]);
+      }
+      for (const file of staged) {
+        yield* fs.writeFileString(path.join(cwd, file), "staged\n");
+        yield* git(["add", `sub/${file}`]);
+      }
+      const tracked = [...committed, ...staged];
       yield* fs.writeFileString(path.join(parent, ".gitignore"), "sub/\n");
-      yield* fs.writeFileString(path.join(cwd, "tracked.txt"), "after\n");
+      for (const file of tracked) {
+        yield* fs.writeFileString(path.join(cwd, file), `${file} working\n`);
+      }
       yield* fs.writeFileString(path.join(cwd, "secret.txt"), "private\n");
       const originalIndex = yield* fs.readFile(path.join(parent, ".git", "index"));
 
-      yield* driver.checkpoints.captureCheckpoint({ cwd, checkpointRef });
-
-      assert.strictEqual(
-        (yield* git(["show", `${checkpointRef}:sub/tracked.txt`])).stdout,
-        "after\n",
+      const captured = yield* Effect.result(
+        driver.checkpoints.captureCheckpoint({ cwd, checkpointRef }),
       );
+
+      assert.deepEqual(yield* fs.readFile(path.join(parent, ".git", "index")), originalIndex);
+      if (captured._tag === "Failure") return yield* captured.failure;
       assert.strictEqual(
         (yield* git(["ls-tree", "-r", "--name-only", checkpointRef, "--", "sub"])).stdout,
-        "sub/tracked.txt\n",
+        tracked.map((file) => `sub/${file}\n`).join(""),
       );
-      assert.deepEqual(yield* fs.readFile(path.join(parent, ".git", "index")), originalIndex);
+      for (const file of tracked) {
+        assert.strictEqual(
+          (yield* git(["show", `${checkpointRef}:sub/${file}`])).stdout,
+          `${file} working\n`,
+        );
+      }
     }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
 );
 
