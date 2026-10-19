@@ -27,6 +27,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as DelegatedTaskQuestionReactor from "./DelegatedTaskQuestionReactor.ts";
+import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EventSink from "./EventSink.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -47,6 +48,7 @@ const layerDatabase = SqlitePersistence.layerMemory;
 const layerTest = Layer.mergeAll(
   layerDatabase,
   ProjectionStore.layer.pipe(Layer.provide(layerDatabase)),
+  EffectOutbox.layer.pipe(Layer.provide(layerDatabase)),
   ProviderReplayHarness.layerWithRegistry(
     { name: "control-reads" },
     ProviderAdapterRegistry.layerFromAdapters([adapter]),
@@ -61,6 +63,7 @@ it.effect(
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const projections = yield* ProjectionStore.ProjectionStoreV2;
       const sql = yield* SqlClient.SqlClient;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
       const threadId = ThreadId.make("thread:control-dispatch");
       const now = yield* DateTime.now;
       yield* orchestrator.dispatch({
@@ -207,6 +210,37 @@ it.effect(
             questions: [],
           },
         });
+        const answers = { text: "Blue", list: ["Red"], codex: { answers: ["Green"] } };
+        const normalizedAnswers = { ...answers, codex: ["Green"] };
+        if (mode === "live") {
+          const pending = yield* projections.getRuntimeResponseContext(threadId, requestId);
+          const sequence = yield* orchestrator.getThreadEventSequence(threadId);
+          for (const [index, value] of [
+            null,
+            42,
+            { choice: "Blue" },
+            ["Blue", 42],
+            { answers: [42] },
+          ].entries()) {
+            const commandId = CommandId.make(`invalid-answer:${index}`);
+            const result = yield* orchestrator
+              .dispatch({
+                type: "runtime-request.respond",
+                commandId,
+                threadId,
+                requestId,
+                answers: { ...answers, invalid: value },
+              })
+              .pipe(Effect.result);
+            assert.isTrue(Result.isFailure(result));
+            assert.deepEqual(
+              yield* projections.getRuntimeResponseContext(threadId, requestId),
+              pending,
+            );
+            assert.equal(yield* orchestrator.getThreadEventSequence(threadId), sequence);
+            assert.deepEqual(yield* outbox.listByCommandId(commandId), []);
+          }
+        }
         yield* orchestrator.dispatch(
           mode === "live"
             ? {
@@ -214,7 +248,7 @@ it.effect(
                 commandId: CommandId.make(`respond:${mode}`),
                 threadId,
                 requestId,
-                decision: "accept",
+                answers,
               }
             : {
                 type: "thread.user-input.dismiss",
@@ -230,6 +264,25 @@ it.effect(
         const response = yield* projections.getRuntimeResponseContext(threadId, requestId);
         assert.equal(response.node?.status, mode === "live" ? "completed" : "cancelled");
         assert.equal(response.item?.status, mode === "live" ? "completed" : "cancelled");
+        if (mode === "live") {
+          assert.deepEqual(response.request?.answers, normalizedAnswers);
+          assert.equal(response.item?.type, "user_input_request");
+          if (response.item?.type === "user_input_request") {
+            assert.deepEqual(response.item.questionAnswer?.answers, normalizedAnswers);
+          }
+          const effects = yield* outbox.listByCommandId(CommandId.make(`respond:${mode}`));
+          assert.deepEqual(
+            effects.map((effect) => effect.request),
+            [
+              {
+                type: "runtime-request.respond",
+                providerSessionId: sessionId,
+                requestId,
+                answers: normalizedAnswers,
+              },
+            ],
+          );
+        }
       }
       yield* orchestrator.dispatch({
         type: "thread.metadata.update",
@@ -1037,87 +1090,4 @@ it.effect("replays a thread.create receipt without changing the thread", () =>
     assert.deepEqual(yield* projections.getThread(threadId), before);
     assert.equal(yield* orchestrator.getThreadEventSequence(threadId), original.sequence);
   }).pipe(Effect.provide(layerTest)),
-);
-
-it.effect("rejects an unusable user-input answer before the request resolves", () =>
-  Effect.gen(function* () {
-    const orchestrator = yield* Orchestrator.OrchestratorV2;
-    const projections = yield* ProjectionStore.ProjectionStoreV2;
-    const threadId = ThreadId.make("thread:answer-shape");
-    const sessionId = ProviderSessionId.make("session:answer-shape");
-    const requestId = RuntimeRequestId.make("request:answer-shape");
-    const now = yield* DateTime.now;
-    yield* orchestrator.dispatch({
-      type: "thread.create",
-      commandId: CommandId.make("create-answer-shape"),
-      threadId,
-      projectId: ProjectId.make("project:answer-shape"),
-      title: "Question",
-      modelSelection,
-      runtimeMode: "full-access",
-      interactionMode: "default",
-      branch: null,
-      worktreePath: null,
-      createdBy: "user",
-      creationSource: "web",
-    });
-    yield* projections.apply({
-      id: EventId.make("attach-answer-shape"),
-      type: "provider-session.attached",
-      threadId,
-      occurredAt: now,
-      payload: {
-        id: sessionId,
-        driver: adapter.driver,
-        providerInstanceId: instanceId,
-        status: "ready",
-        cwd: "/repo",
-        model: "gpt-5.1-codex",
-        capabilities: CodexProviderCapabilitiesV2,
-        createdAt: now,
-        updatedAt: now,
-        lastError: null,
-      },
-    });
-    yield* projections.apply({
-      id: EventId.make("request:answer-shape"),
-      type: "runtime-request.updated",
-      threadId,
-      occurredAt: now,
-      payload: {
-        id: requestId,
-        nodeId: NodeId.make("node:answer-shape"),
-        providerTurnId: null,
-        nativeRequestRef: null,
-        kind: "user_input",
-        status: "pending",
-        responseCapability: { type: "live", providerSessionId: sessionId },
-        createdAt: now,
-        resolvedAt: null,
-      },
-    });
-
-    const invalid = yield* orchestrator
-      .dispatch({
-        type: "runtime-request.respond",
-        commandId: CommandId.make("answer-shape-invalid"),
-        threadId,
-        requestId,
-        answers: { "Which color?": { choice: "Blue" } },
-      })
-      .pipe(Effect.result);
-    assert.equal(invalid._tag, "Failure");
-    assert.equal((yield* projections.getRuntimeRequest(threadId, requestId))?.status, "pending");
-
-    yield* orchestrator.dispatch({
-      type: "runtime-request.respond",
-      commandId: CommandId.make("answer-shape-codex"),
-      threadId,
-      requestId,
-      answers: { "Which color?": { answers: ["Blue"] } },
-    });
-    const resolved = yield* projections.getRuntimeRequest(threadId, requestId);
-    assert.equal(resolved?.status, "resolved");
-    assert.deepEqual(resolved?.answers, { "Which color?": ["Blue"] });
-  }).pipe(Effect.provide(testLayer)),
 );

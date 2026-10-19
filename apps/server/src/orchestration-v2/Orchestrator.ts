@@ -498,14 +498,16 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
   }
 }
 
-// Adapters coerce whatever they receive, so an unusable answer must be rejected
-// here, before the request resolves. Codex's native `{ answers }` shape is accepted.
-const decodeUserInputAnswer = Schema.decodeUnknownOption(
-  Schema.Union([
+// Validate before resolving the request: adapters may otherwise coerce unusable answers.
+const decodeUserInputAnswers = Schema.decodeUnknownEffect(
+  Schema.Record(
     Schema.String,
-    Schema.Array(Schema.String),
-    Schema.Struct({ answers: Schema.Array(Schema.String) }),
-  ]),
+    Schema.Union([
+      Schema.String,
+      Schema.Array(Schema.String),
+      Schema.Struct({ answers: Schema.Array(Schema.String) }),
+    ]),
+  ),
 );
 
 function pendingThreadTitleGenerationEffect(
@@ -7422,22 +7424,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           cause: `Provider session ${providerSessionId} was not found.`,
         });
       }
-      const answerEntries: Array<readonly [string, string | ReadonlyArray<string>]> = [];
-      for (const [questionId, value] of Object.entries(command.answers ?? {})) {
-        const answer = Option.getOrUndefined(decodeUserInputAnswer(value));
-        if (answer === undefined) {
-          return yield* new OrchestratorDispatchError({
-            commandId: command.commandId,
-            commandType: command.type,
-            cause: `The answer to question ${questionId} must be text or a list of text.`,
-          });
-        }
-        answerEntries.push([
-          questionId,
-          typeof answer === "object" && "answers" in answer ? answer.answers : answer,
-        ]);
+      let answers = command.answers;
+      if (runtimeRequest.kind === "user_input" && answers !== undefined) {
+        const decoded = yield* decodeUserInputAnswers(answers).pipe(mapDispatchError(command));
+        answers = Object.fromEntries(
+          Object.entries(decoded).map(([questionId, answer]) => [
+            questionId,
+            typeof answer === "object" && "answers" in answer ? answer.answers : answer,
+          ]),
+        );
       }
-      const answers = command.answers === undefined ? undefined : Object.fromEntries(answerEntries);
 
       const now = yield* DateTime.now;
       const resolvedRequest = {
